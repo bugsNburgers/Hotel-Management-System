@@ -1,6 +1,6 @@
 -- ===============================================
 -- HOTEL BOOKING SYSTEM - ENHANCED SQL SCHEMA
--- Base: Your Original Database + Upgrades for Streamlit Integration
+-- With Staff Management Module
 -- ===============================================
 
 CREATE DATABASE IF NOT EXISTS hotel_booking;
@@ -69,7 +69,7 @@ CREATE TABLE Hotel_Class (
 );
 
 -- ==========================
--- 3️⃣ CUSTOMER & BOOKING MODULE
+-- 4️⃣ CUSTOMER & BOOKING MODULE
 -- ==========================
 CREATE TABLE Customer (
     cust_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -94,7 +94,7 @@ CREATE TABLE Booking (
 );
 
 -- ==========================
--- 4️⃣ PAYMENT MODULE
+-- 5️⃣ PAYMENT MODULE
 -- ==========================
 CREATE TABLE Payment (
     pay_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -107,7 +107,7 @@ CREATE TABLE Payment (
 );
 
 -- ==========================
--- 5️⃣ AUDIT MODULE
+-- 6️⃣ AUDIT MODULE
 -- ==========================
 CREATE TABLE IF NOT EXISTS Payment_Audit (
     audit_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -119,7 +119,31 @@ CREATE TABLE IF NOT EXISTS Payment_Audit (
 );
 
 -- ==========================
--- 6️⃣ PROCEDURE + FUNCTION + TRIGGER
+-- 6️⃣ INDEXES FOR PERFORMANCE
+-- ==========================
+CREATE INDEX idx_booking_date ON Booking(book_date);
+CREATE INDEX idx_customer_email ON Customer(cust_email);
+
+-- ==========================
+-- 7️⃣ VIEWS
+-- ==========================
+
+-- View: Hotel Revenue Summary
+CREATE OR REPLACE VIEW vw_hotel_revenue AS
+SELECT 
+    h.hotel_id,
+    h.hotel_name,
+    h.hotel_type,
+    COUNT(DISTINCT b.book_id) as total_bookings,
+    COALESCE(SUM(p.pay_amt), 0) as total_revenue,
+    AVG(p.pay_amt) as avg_payment
+FROM Hotel h
+LEFT JOIN Booking b ON h.hotel_id = b.hotel_id
+LEFT JOIN Payment p ON b.book_id = p.book_id
+GROUP BY h.hotel_id, h.hotel_name, h.hotel_type;
+
+-- ==========================
+-- 9️⃣ STORED PROCEDURES
 -- ==========================
 
 DELIMITER $$
@@ -136,6 +160,7 @@ CREATE PROCEDURE sp_make_booking(
 BEGIN
     DECLARE last_book_id INT;
     START TRANSACTION;
+    
     INSERT INTO Booking (cust_id, hotel_id, book_date, book_type, book_desc)
     VALUES (p_cust_id, p_hotel_id, p_book_date, p_book_type, p_book_desc);
     
@@ -150,6 +175,10 @@ BEGIN
     SELECT last_book_id AS booking_id;
 END$$
 
+-- ==========================
+-- 9️⃣ FUNCTIONS
+-- ==========================
+
 -- FUNCTION: Total payments for a booking
 CREATE FUNCTION fn_get_booking_total(bid INT)
 RETURNS DECIMAL(10,2)
@@ -160,6 +189,10 @@ BEGIN
     FROM Payment WHERE book_id = bid;
     RETURN total;
 END$$
+
+-- ==========================
+-- 🔟 TRIGGERS
+-- ==========================
 
 -- TRIGGER: Auto-insert into Payment_Audit
 CREATE TRIGGER trg_after_payment
@@ -173,64 +206,103 @@ END$$
 DELIMITER ;
 
 -- ==========================
--- 7️⃣ SAMPLE DATA
+-- 1️⃣1️⃣ SAMPLE DATA
 -- ==========================
-INSERT INTO Roles (role_name, role_desc) VALUES
-('admin','System administrator'),
-('manager','Hotel manager'),
-('customer','Registered user');
 
+-- Base Roles (only 3 roles)
+INSERT INTO Roles (role_name, role_desc) VALUES
+('admin','System administrator with full access'),
+('staff','Hotel staff managing bookings and operations'),
+('customer','Registered customer user');
+
+-- Admin User
 INSERT INTO User (user_name, user_email, user_mobile, user_address)
-VALUES ('Admin User','admin@example.com','9999999999','PES University');
+VALUES ('Admin User','admin@example.com','9999999999','PES University, Bangalore');
 
 INSERT INTO Login (user_id, username, password)
 VALUES (1,'admin','adminpass');
 
+INSERT INTO User_Roles (user_id, role_id)
+VALUES (1, 1); -- Admin role
+
+-- Sample Staff Member
+INSERT INTO User (user_name, user_email, user_mobile, user_address)
+VALUES ('John Smith','staff@hotel.com','8888888888','Staff Quarters, Hotel');
+
+INSERT INTO Login (user_id, username, password)
+VALUES (2,'staff','staffpass');
+
+-- Assign staff role (role_id 2 = staff)
+INSERT INTO User_Roles (user_id, role_id)
+VALUES (2, 2);
+
+-- Sample Hotel (no manager assignment)
 INSERT INTO Hotel (hotel_name, hotel_type, hotel_desc, user_id)
-VALUES ('Sunrise Hotel','3-star','Comfortable midrange hotel',1);
+VALUES ('Grand Sunrise Hotel','5-Star Luxury','Premium luxury hotel with world-class amenities', NULL);
 
-INSERT INTO Hotel_Class (hotel_id, class_name, class_rent, room_count)
-VALUES (1, 'Standard', 2500.00, 10),
-       (1, 'Deluxe', 3500.00, 5),
-       (1, 'Suite', 5000.00, 2);
+INSERT INTO Hotel_Class (hotel_id, class_name, class_rent, room_count) VALUES
+(1, 'Standard Room', 2500.00, 10),
+(1, 'Deluxe Room', 3500.00, 8),
+(1, 'Executive Suite', 5000.00, 5),
+(1, 'Presidential Suite', 10000.00, 2);
 
+-- Sample Customer
 INSERT INTO Customer (cust_name, cust_email, cust_mobile, cust_pass)
-VALUES ('John Doe','johndoe@example.com','8888888888','secret');
+VALUES ('Jane Doe','jane.doe@example.com','7777777777','customerpass');
 
-INSERT INTO Booking (cust_id, hotel_id, book_date, book_type, book_desc)
-VALUES (1,1,CURDATE(),'single','One-night booking');
+-- Sample Booking
+INSERT INTO Booking (cust_id, hotel_id, book_date, check_in, check_out, book_type, book_desc)
+VALUES (1, 1, CURDATE(), CURDATE(), DATE_ADD(CURDATE(), INTERVAL 2 DAY), 'double', 'Honeymoon package');
 
-INSERT INTO Payment (book_id, pay_date, pay_amt, pay_desc)
-VALUES (1,CURDATE(),2500.00,'Payment for one night');
+-- Sample Payment
+INSERT INTO Payment (book_id, pay_date, pay_amt, pay_method, pay_desc)
+VALUES (1, CURDATE(), 7000.00, 'Card', 'Payment for 2 nights - Deluxe Room');
+
+-- Sample Staff Schedule
+INSERT INTO Staff_Schedule (user_id, role_name, shift_date, shift_start, shift_end, status) VALUES
+(2, 'receptionist', CURDATE(), '09:00:00', '17:00:00', 'Scheduled'),
+(2, 'concierge', DATE_ADD(CURDATE(), INTERVAL 1 DAY), '14:00:00', '22:00:00', 'Scheduled');
 
 -- ==========================
--- 8️⃣ USEFUL QUERIES
+-- 1️⃣3️⃣ USEFUL QUERIES
 -- ==========================
 
 -- Top customers by spending
-SELECT cust_id, cust_name
-FROM Customer
-WHERE cust_id IN (
-  SELECT b.cust_id
-  FROM Booking b
-  JOIN Payment p ON p.book_id = b.book_id
-  GROUP BY b.cust_id
-  HAVING SUM(p.pay_amt) > (
-    SELECT AVG(total_spent)
+SELECT 
+    c.cust_id, 
+    c.cust_name,
+    c.cust_email,
+    COUNT(b.book_id) as total_bookings,
+    SUM(p.pay_amt) as total_spent
+FROM Customer c
+JOIN Booking b ON c.cust_id = b.cust_id
+JOIN Payment p ON b.book_id = p.book_id
+GROUP BY c.cust_id, c.cust_name, c.cust_email
+HAVING total_spent > (
+    SELECT AVG(customer_total)
     FROM (
-      SELECT SUM(pay_amt) AS total_spent
-      FROM Payment p2
-      JOIN Booking b2 ON b2.book_id = p2.book_id
-      GROUP BY b2.cust_id
-    ) AS t
-  )
-);
+        SELECT SUM(p2.pay_amt) as customer_total
+        FROM Payment p2
+        JOIN Booking b2 ON b2.book_id = p2.book_id
+        GROUP BY b2.cust_id
+    ) AS avg_calc
+)
+ORDER BY total_spent DESC;
 
 -- Revenue per hotel
-SELECT h.hotel_id, h.hotel_name,
-       COALESCE(SUM(p.pay_amt),0) AS total_revenue
+SELECT 
+    h.hotel_id, 
+    h.hotel_name,
+    h.hotel_type,
+    COUNT(DISTINCT b.book_id) as total_bookings,
+    COALESCE(SUM(p.pay_amt), 0) AS total_revenue,
+    AVG(p.pay_amt) as avg_booking_value
 FROM Hotel h
 LEFT JOIN Booking b ON b.hotel_id = h.hotel_id
 LEFT JOIN Payment p ON p.book_id = b.book_id
-GROUP BY h.hotel_id, h.hotel_name
+GROUP BY h.hotel_id, h.hotel_name, h.hotel_type
 ORDER BY total_revenue DESC;
+
+-- ==========================
+-- END OF SCHEMA
+-- ==========================

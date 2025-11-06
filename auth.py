@@ -14,12 +14,20 @@ def verify_password(stored: str, provided: str) -> bool:
 def login_user(identifier: str, password: str):
     """
     Try to login:
-    1) Check Login table (system users)
-    2) If not found, check Customer table (customer login via email)
+    1) Check Login table (system users by username)
+    2) Check Login table (system users by email)
+    3) If not found, check Customer table (customer login via email)
     Returns dict with keys: type ('system' or 'customer'), login_row/user_row/roles
     """
     # 1) System user login (Login.username)
     row = fetch_one("SELECT * FROM Login WHERE username = %s", (identifier,))
+    
+    # 2) If not found, try to find by email
+    if not row:
+        user_by_email = fetch_one("SELECT * FROM `User` WHERE user_email = %s", (identifier,))
+        if user_by_email:
+            row = fetch_one("SELECT * FROM Login WHERE user_id = %s", (user_by_email['user_id'],))
+    
     if row:
         if verify_password(row['password'], password):
             user = fetch_one("SELECT * FROM `User` WHERE user_id = %s", (row['user_id'],))
