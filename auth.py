@@ -87,8 +87,32 @@ def create_system_user(user_name, user_email, user_mobile, user_address, usernam
     return user_id
 
 def register_customer(cust_name, cust_email, cust_mobile, password):
-    # store hashed password
+    """
+    Register a new customer with proper User table linkage
+    Creates: User -> Customer -> User_Roles (customer role)
+    Stores hashed password in Customer table
+    """
+    # Step 1: Create User record
+    user_id = execute("""
+        INSERT INTO `User` (user_name, user_email, user_mobile, user_address)
+        VALUES (%s, %s, %s, %s)
+    """, (cust_name, cust_email, cust_mobile, 'Customer Address'))
+    
+    # Step 2: Create Customer record linked to User
     hp = hash_pass(password)
-    cust_id = execute("INSERT INTO Customer (cust_name, cust_email, cust_mobile, cust_pass) VALUES (%s,%s,%s,%s)",
-                      (cust_name, cust_email, cust_mobile, hp))
+    cust_id = execute("""
+        INSERT INTO Customer (user_id, cust_name, cust_email, cust_mobile, cust_pass)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (user_id, cust_name, cust_email, cust_mobile, hp))
+    
+    # Step 3: Assign customer role
+    customer_role = fetch_one("SELECT role_id FROM Roles WHERE role_name='customer'")
+    if customer_role:
+        try:
+            execute("INSERT INTO User_Roles (user_id, role_id) VALUES (%s, %s)",
+                    (user_id, customer_role['role_id']))
+        except Exception:
+            pass  # Role assignment may fail if already exists
+    
     return cust_id
+

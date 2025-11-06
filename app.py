@@ -337,16 +337,25 @@ if not st.session_state['auth']['logged_in']:
                     st.error("⚠️ Please enter credentials")
                 else:
                     with st.spinner("Authenticating..."):
-                        cust = fetch_one("SELECT * FROM Customer WHERE cust_email = %s AND cust_pass = %s", 
-                                        (cust_email, cust_pass))
+                        from auth import hash_pass
+                        # Try both hashed and plaintext for backward compatibility
+                        cust = fetch_one("SELECT * FROM Customer WHERE cust_email = %s", (cust_email,))
+                        
                         if cust:
-                            st.session_state['auth']['logged_in'] = True
-                            st.session_state['auth']['type'] = 'customer'
-                            st.session_state['auth']['roles'] = ['customer']
-                            st.session_state['auth']['user'] = cust
-                            st.success("✅ Welcome back!")
-                            st.balloons()
-                            st.rerun()
+                            stored_pass = cust.get('cust_pass', '')
+                            hashed_input = hash_pass(cust_pass)
+                            
+                            # Check if password matches (hashed or plaintext)
+                            if stored_pass == hashed_input or stored_pass == cust_pass:
+                                st.session_state['auth']['logged_in'] = True
+                                st.session_state['auth']['type'] = 'customer'
+                                st.session_state['auth']['roles'] = ['customer']
+                                st.session_state['auth']['user'] = cust
+                                st.success("✅ Welcome back!")
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                st.error("❌ Invalid credentials")
                         else:
                             st.error("❌ Invalid credentials")
         
@@ -465,7 +474,15 @@ else:
         # Users Tab
         with tabs[0]:
             st.markdown("### 👥 System Users Management")
-            users = fetch_all("SELECT user_id, user_name, user_email, user_mobile FROM `User`")
+            users = fetch_all("""
+                SELECT DISTINCT u.user_id, u.user_name, u.user_email, u.user_mobile,
+                       GROUP_CONCAT(r.role_name SEPARATOR ', ') as roles
+                FROM `User` u
+                LEFT JOIN User_Roles ur ON u.user_id = ur.user_id
+                LEFT JOIN Roles r ON ur.role_id = r.role_id
+                GROUP BY u.user_id, u.user_name, u.user_email, u.user_mobile
+                ORDER BY u.user_id
+            """)
             st.dataframe(users, use_container_width=True, height=300)
             
             with st.expander("➕ Create New System User", expanded=False):
@@ -581,7 +598,7 @@ else:
         
         # Hotels Tab
         with tabs[2]:
-            st.markdown("### 🏨 Hotels Management")
+            st.markdown("### 🏨 Hotels & Rooms Management")
             hotels = fetch_all("SELECT * FROM Hotel")
             
             for hotel in hotels:
@@ -589,6 +606,68 @@ else:
                     col1, col2 = st.columns([2, 1])
                     with col1:
                         st.write(f"**Description:** {hotel.get('hotel_desc', 'N/A')}")
+                        
+                        # Show room classes for this hotel
+                        st.markdown("#### 🛏️ Room Classes")
+                        room_classes = fetch_all("""
+                            SELECT class_id, class_name, class_rent, room_count
+                            FROM Hotel_Class
+                            WHERE hotel_id = %s
+                        """, (hotel['hotel_id'],))
+                        
+                        if room_classes:
+                            for rc in room_classes:
+                                st.write(f"- **{rc['class_name']}**: ₹{rc['class_rent']}/night ({rc['room_count']} rooms)")
+                        else:
+                            st.info("No room classes defined yet")
+                        
+                        # Show individual rooms
+                        st.markdown("#### 🏠 Room Inventory")
+                        rooms = fetch_all("""
+                            SELECT r.room_id, r.room_number, r.room_status, hc.class_name
+                            FROM Rooms r
+                            JOIN Hotel_Class hc ON r.class_id = hc.class_id
+                            WHERE r.hotel_id = %s
+                            ORDER BY r.room_number
+                        """, (hotel['hotel_id'],))
+                        
+                        if rooms:
+                            room_df = [{
+                                'Room #': r['room_number'],
+                                'Class': r['class_name'],
+                                'Status': r['room_status']
+                            } for r in rooms]
+                            st.dataframe(room_df, use_container_width=True, height=200)
+                        else:
+                            st.info("No rooms added yet")
+                        
+                        # Add room form
+                        with st.form(f"add_room_{hotel['hotel_id']}"):
+                            st.markdown("**➕ Add New Room**")
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                room_num = st.text_input("Room Number", key=f"rnum_{hotel['hotel_id']}")
+                            with col_b:
+                                if room_classes:
+                                    class_options = {rc['class_name']: rc['class_id'] for rc in room_classes}
+                                    selected_class = st.selectbox("Room Class", options=list(class_options.keys()), 
+                                                                  key=f"rclass_{hotel['hotel_id']}")
+                                    class_id = class_options[selected_class]
+                                else:
+                                    st.warning("Add room class first")
+                                    class_id = None
+                            
+                            if st.form_submit_button("Add Room") and class_id and room_num:
+                                try:
+                                    execute("""
+                                        INSERT INTO Rooms (hotel_id, class_id, room_number, room_status)
+                                        VALUES (%s, %s, %s, 'Available')
+                                    """, (hotel['hotel_id'], class_id, room_num))
+                                    st.success(f"✅ Room {room_num} added!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error: {e}")
+                    
                     with col2:
                         st.image("https://images.unsplash.com/photo-1551882547-ff40c63fe5fa?w=400", use_container_width=True)
             
@@ -612,11 +691,18 @@ else:
         with tabs[3]:
             st.markdown("### 📅 All Bookings")
             rows = fetch_all("""
-                SELECT b.book_id, b.book_date, b.book_type, b.booking_status, 
-                       c.cust_name, h.hotel_name
+                SELECT b.book_id, b.book_date, b.check_in, b.check_out, b.book_type, b.booking_status,
+                       c.cust_name, c.cust_email, h.hotel_name, 
+                       r.room_number, hc.class_name as room_class,
+                       u.user_name as booked_by,
+                       p.pay_amt, p.pay_method
                 FROM Booking b
                 JOIN Customer c ON c.cust_id=b.cust_id
                 JOIN Hotel h ON h.hotel_id=b.hotel_id
+                JOIN User u ON u.user_id=b.user_id
+                LEFT JOIN Rooms r ON r.room_id=b.room_id
+                LEFT JOIN Hotel_Class hc ON r.class_id=hc.class_id
+                LEFT JOIN Payment p ON p.book_id=b.book_id
                 ORDER BY b.book_date DESC
             """)
             st.dataframe(rows, use_container_width=True, height=400)
@@ -651,23 +737,124 @@ else:
         with col1:
             st.markdown("#### 📋 Today's Bookings & Check-ins")
             recent_bookings = fetch_all("""
-                SELECT b.book_id, c.cust_name, h.hotel_name, b.booking_status
+                SELECT b.book_id, b.check_in, b.check_out, b.booking_status,
+                       c.cust_name, c.cust_email, h.hotel_name,
+                       r.room_number, hc.class_name as room_type
                 FROM Booking b
                 JOIN Customer c ON c.cust_id = b.cust_id
                 JOIN Hotel h ON h.hotel_id = b.hotel_id
-                ORDER BY b.book_date DESC
+                LEFT JOIN Rooms r ON r.room_id = b.room_id
+                LEFT JOIN Hotel_Class hc ON r.class_id = hc.class_id
+                WHERE b.check_in >= CURDATE()
+                ORDER BY b.check_in ASC
                 LIMIT 10
             """)
             st.dataframe(recent_bookings, use_container_width=True)
 
         with col2:
-            st.markdown("#### Quick Actions")
-            if st.button("➕ New Walk-in Booking", use_container_width=True):
-                st.info("Walk-in booking form would appear here")
-            if st.button("🔍 Search Guest", use_container_width=True):
-                st.info("Guest search interface would appear here")
-            if st.button("✅ Mark Check-in", use_container_width=True):
-                st.info("Check-in marked")
+            st.markdown("#### 🏠 Room Management")
+            
+            # Room status overview
+            room_stats = fetch_one("""
+                SELECT 
+                    COUNT(*) as total_rooms,
+                    SUM(CASE WHEN room_status = 'Available' THEN 1 ELSE 0 END) as available,
+                    SUM(CASE WHEN room_status = 'Occupied' THEN 1 ELSE 0 END) as occupied,
+                    SUM(CASE WHEN room_status = 'Reserved' THEN 1 ELSE 0 END) as reserved,
+                    SUM(CASE WHEN room_status = 'Maintenance' THEN 1 ELSE 0 END) as maintenance
+                FROM Rooms
+            """)
+            
+            if room_stats:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.metric("🟢 Available", room_stats.get('available', 0))
+                    st.metric("🔴 Occupied", room_stats.get('occupied', 0))
+                with col_b:
+                    st.metric("🟡 Reserved", room_stats.get('reserved', 0))
+                    st.metric("🔧 Maintenance", room_stats.get('maintenance', 0))
+            
+            st.markdown("---")
+            
+            # Quick Actions with functionality
+            st.markdown("#### ⚡ Quick Actions")
+            
+            # Guest Search
+            with st.expander("🔍 Search Guest", expanded=False):
+                search_email = st.text_input("Enter guest email", key="staff_search_email")
+                if st.button("Search", key="btn_search_guest"):
+                    if search_email:
+                        guest_bookings = fetch_all("""
+                            SELECT b.book_id, b.check_in, b.check_out, b.booking_status,
+                                   c.cust_name, c.cust_email, h.hotel_name,
+                                   r.room_number, hc.class_name
+                            FROM Booking b
+                            JOIN Customer c ON c.cust_id = b.cust_id
+                            JOIN Hotel h ON h.hotel_id = b.hotel_id
+                            LEFT JOIN Rooms r ON r.room_id = b.room_id
+                            LEFT JOIN Hotel_Class hc ON r.class_id = hc.class_id
+                            WHERE c.cust_email LIKE %s
+                            ORDER BY b.book_date DESC
+                        """, (f"%{search_email}%",))
+                        
+                        if guest_bookings:
+                            st.success(f"Found {len(guest_bookings)} booking(s)")
+                            st.dataframe(guest_bookings, use_container_width=True)
+                        else:
+                            st.warning("No bookings found for this email")
+                    else:
+                        st.error("Please enter an email")
+            
+            # Mark Check-in
+            with st.expander("✅ Mark Check-in", expanded=False):
+                booking_id = st.number_input("Booking ID", min_value=1, step=1, key="staff_checkin_id")
+                if st.button("Confirm Check-in", key="btn_mark_checkin"):
+                    try:
+                        # Update booking status
+                        execute("UPDATE Booking SET booking_status = 'Confirmed' WHERE book_id = %s", (booking_id,))
+                        
+                        # Get room and update to Occupied
+                        room_info = fetch_one("""
+                            SELECT room_id FROM Booking WHERE book_id = %s
+                        """, (booking_id,))
+                        
+                        if room_info and room_info.get('room_id'):
+                            execute("UPDATE Rooms SET room_status = 'Occupied' WHERE room_id = %s", 
+                                    (room_info['room_id'],))
+                        
+                        st.success(f"✅ Check-in completed for Booking #{booking_id}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            
+            # Update Room Status
+            with st.expander("🔧 Update Room Status", expanded=False):
+                all_rooms = fetch_all("""
+                    SELECT r.room_id, r.room_number, h.hotel_name, r.room_status
+                    FROM Rooms r
+                    JOIN Hotel h ON r.hotel_id = h.hotel_id
+                    ORDER BY h.hotel_name, r.room_number
+                """)
+                
+                if all_rooms:
+                    room_options = {f"{r['hotel_name']} - Room {r['room_number']} (Current: {r['room_status']})": r['room_id'] 
+                                    for r in all_rooms}
+                    selected_room = st.selectbox("Select Room", options=list(room_options.keys()), key="staff_room_select")
+                    new_status = st.selectbox("New Status", 
+                                              ["Available", "Occupied", "Reserved", "Maintenance"],
+                                              key="staff_new_status")
+                    
+                    if st.button("Update Status", key="btn_update_room_status"):
+                        try:
+                            room_id = room_options[selected_room]
+                            execute("UPDATE Rooms SET room_status = %s WHERE room_id = %s", 
+                                    (new_status, room_id))
+                            st.success(f"✅ Room status updated to {new_status}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                else:
+                    st.info("No rooms available in the system")
         st.markdown("---")
 
     # CUSTOMER view
@@ -678,15 +865,6 @@ else:
                 <p>Browse and book from our collection of premium hotels</p>
             </div>
         """, unsafe_allow_html=True)
-        
-        # Search and filter section
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            search_term = st.text_input("🔍 Search hotels", placeholder="Search by name or location...")
-        with col2:
-            filter_type = st.selectbox("⭐ Filter by type", ["All", "5-Star", "4-Star", "3-Star", "Budget"])
-        with col3:
-            sort_by = st.selectbox("📊 Sort by", ["Name", "Price", "Rating"])
         
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -719,9 +897,9 @@ else:
                 
                 st.markdown(f"""
                     <div class="hotel-card">
-                        <h3>🏨 {base['hotel_name']}</h3>
-                        <p style="color: #666; margin: 10px 0;">⭐ {base.get('hotel_type', 'Standard Hotel')}</p>
-                        <p style="margin: 15px 0;">{base.get('hotel_desc', 'Luxury accommodation with premium amenities')}</p>
+                        <h3 style="color: #333; margin: 0 0 10px 0;">🏨 {base['hotel_name']}</h3>
+                        <p style="color: #667eea; margin: 10px 0; font-weight: 500;">⭐ {base.get('hotel_type', 'Standard Hotel')}</p>
+                        <p style="color: #555; margin: 15px 0; line-height: 1.6;">{base.get('hotel_desc', 'Luxury accommodation with premium amenities')}</p>
                     </div>
                 """, unsafe_allow_html=True)
                 
@@ -731,10 +909,22 @@ else:
                     for r in rows:
                         if r['class_id']:
                             has_rooms = True
-                            col_a, col_b = st.columns([3, 1])
+                            # Get available room count for this class
+                            available_count = fetch_one("""
+                                SELECT COUNT(*) as cnt FROM Rooms 
+                                WHERE hotel_id = %s AND class_id = %s AND room_status = 'Available'
+                            """, (hid, r['class_id']))
+                            
+                            avail_cnt = available_count['cnt'] if available_count else 0
+                            total_cnt = r.get('room_count', 0)
+                            
+                            col_a, col_b, col_c = st.columns([2, 1, 1])
                             with col_a:
-                                st.write(f"**{r['class_name']}** • {r.get('room_count', 0)} rooms available")
+                                st.write(f"**{r['class_name']}**")
                             with col_b:
+                                status_color = "🟢" if avail_cnt > 0 else "🔴"
+                                st.write(f"{status_color} {avail_cnt}/{total_cnt} available")
+                            with col_c:
                                 st.write(f"**₹{r['class_rent']:,.0f}**/night")
                     
                     if not has_rooms:
@@ -758,6 +948,15 @@ else:
                 </div>
             """, unsafe_allow_html=True)
             
+            # Get available rooms for this hotel
+            available_rooms = fetch_all("""
+                SELECT r.room_id, r.room_number, hc.class_name, hc.class_rent, r.room_status
+                FROM Rooms r
+                JOIN Hotel_Class hc ON r.class_id = hc.class_id
+                WHERE r.hotel_id = %s AND r.room_status = 'Available'
+                ORDER BY hc.class_rent
+            """, (hid,))
+            
             col1, col2 = st.columns(2)
             
             with col1:
@@ -767,17 +966,31 @@ else:
                 checkin = st.date_input("📅 Check-in Date", value=date.today(), min_value=date.today())
                 btype = st.selectbox("👥 Booking Type", ["single", "double", "family"], 
                                     format_func=lambda x: f"{'👤' if x=='single' else '👥' if x=='double' else '👨‍👩‍👧‍👦'} {x.title()}")
+                
+                # Room selection
+                if available_rooms:
+                    room_options = {f"Room {r['room_number']} - {r['class_name']} (₹{r['class_rent']:.0f}/night)": r['room_id'] 
+                                    for r in available_rooms}
+                    selected_room = st.selectbox("🏠 Select Room", options=list(room_options.keys()))
+                    room_id = room_options[selected_room]
+                    selected_room_info = next(r for r in available_rooms if r['room_id'] == room_id)
+                else:
+                    st.warning("⚠️ No rooms available at this hotel")
+                    room_id = None
+                    selected_room_info = None
             
             with col2:
                 checkout = st.date_input("📅 Check-out Date", value=date.today() + timedelta(days=1), 
                                         min_value=date.today() + timedelta(days=1))
-                pay_amt = st.number_input("💳 Payment Amount (₹)", value=0.0, min_value=0.0, step=500.0)
+                pay_method = st.selectbox("💳 Payment Method", ["Card", "UPI", "Cash", "Online"])
                 bdesc = st.text_area("📝 Special Requests", placeholder="Any special requirements...")
             
             # Calculate nights and total
-            if checkout > checkin:
+            pay_amt = 0.0
+            if checkout > checkin and selected_room_info:
                 nights = (checkout - checkin).days
-                st.info(f"🌙 Total nights: **{nights}** | Estimated amount: **₹{pay_amt * nights:,.2f}**")
+                pay_amt = selected_room_info['class_rent'] * nights
+                st.info(f"🌙 Total nights: **{nights}** | Total amount: **₹{pay_amt:,.2f}**")
             
             col_confirm, col_cancel = st.columns(2)
             with col_confirm:
@@ -786,17 +999,67 @@ else:
                         st.error("⚠️ Email is required")
                     elif checkout <= checkin:
                         st.error("⚠️ Check-out must be after check-in")
+                    elif not room_id:
+                        st.error("⚠️ Please select a room")
                     else:
                         try:
                             with st.spinner("Processing your booking..."):
+                                # Check if customer exists
                                 cust = fetch_one("SELECT * FROM Customer WHERE cust_email=%s", (c_email,))
+                                
                                 if cust:
                                     cust_id = cust['cust_id']
+                                    user_id = cust.get('user_id')
+                                    
+                                    # If customer doesn't have user_id, create User entry
+                                    if not user_id:
+                                        user_id = execute("""
+                                            INSERT INTO User (user_name, user_email, user_mobile, user_address)
+                                            VALUES (%s, %s, %s, %s)
+                                        """, (cust['cust_name'], c_email, cust.get('cust_mobile', ''), 'Customer Address'))
+                                        
+                                        # Link customer to user
+                                        execute("UPDATE Customer SET user_id = %s WHERE cust_id = %s", (user_id, cust_id))
+                                        
+                                        # Assign customer role
+                                        customer_role = fetch_one("SELECT role_id FROM Roles WHERE role_name='customer'")
+                                        if customer_role:
+                                            execute("INSERT INTO User_Roles (user_id, role_id) VALUES (%s, %s)",
+                                                    (user_id, customer_role['role_id']))
                                 else:
-                                    cust_id = execute("INSERT INTO Customer (cust_name, cust_email) VALUES (%s,%s)",
-                                                      (c_email.split('@')[0], c_email))
+                                    # Create new User first
+                                    user_id = execute("""
+                                        INSERT INTO User (user_name, user_email, user_mobile, user_address)
+                                        VALUES (%s, %s, %s, %s)
+                                    """, (c_email.split('@')[0], c_email, '', 'Customer Address'))
+                                    
+                                    # Create Customer linked to User
+                                    cust_id = execute("""
+                                        INSERT INTO Customer (user_id, cust_name, cust_email, cust_mobile, cust_pass)
+                                        VALUES (%s, %s, %s, %s, %s)
+                                    """, (user_id, c_email.split('@')[0], c_email, '', 'defaultpass'))
+                                    
+                                    # Assign customer role
+                                    customer_role = fetch_one("SELECT role_id FROM Roles WHERE role_name='customer'")
+                                    if customer_role:
+                                        execute("INSERT INTO User_Roles (user_id, role_id) VALUES (%s, %s)",
+                                                (user_id, customer_role['role_id']))
                                 
-                                call_proc('sp_make_booking', [cust_id, hid, checkin, btype, bdesc, pay_amt])
+                                # Call stored procedure with all new parameters
+                                call_proc('sp_make_booking', [
+                                    user_id,        # p_user_id
+                                    cust_id,        # p_cust_id
+                                    hid,            # p_hotel_id
+                                    room_id,        # p_room_id
+                                    date.today(),   # p_book_date
+                                    checkin,        # p_check_in
+                                    checkout,       # p_check_out
+                                    btype,          # p_book_type
+                                    bdesc,          # p_book_desc
+                                    pay_amt,        # p_pay_amt
+                                    pay_method      # p_pay_method
+                                ])
+                                
                                 st.success("🎉 Booking confirmed successfully!")
                                 st.balloons()
                                 del st.session_state['booking_hotel_id']
@@ -830,9 +1093,15 @@ else:
         cust = fetch_one("SELECT * FROM Customer WHERE cust_email=%s", (cust_email,))
         if cust:
             bookings = fetch_all("""
-                SELECT b.book_id, b.book_date, b.booking_status, h.hotel_name, b.book_type
+                SELECT b.book_id, b.book_date, b.check_in, b.check_out, b.booking_status, 
+                       h.hotel_name, b.book_type,
+                       r.room_number, hc.class_name as room_class,
+                       p.pay_amt, p.pay_method
                 FROM Booking b
                 JOIN Hotel h ON h.hotel_id = b.hotel_id
+                LEFT JOIN Rooms r ON r.room_id = b.room_id
+                LEFT JOIN Hotel_Class hc ON r.class_id = hc.class_id
+                LEFT JOIN Payment p ON p.book_id = b.book_id
                 WHERE b.cust_id = %s
                 ORDER BY b.book_date DESC
                 LIMIT 5
@@ -841,6 +1110,10 @@ else:
             if bookings:
                 for bk in bookings:
                     status_emoji = "✅" if bk['booking_status'] == 'Confirmed' else "⏳" if bk['booking_status'] == 'Pending' else "❌"
+                    room_info = f"🏠 Room {bk['room_number']} ({bk['room_class']})" if bk.get('room_number') else "🏠 Room TBD"
+                    payment_info = f"💳 ₹{bk['pay_amt']:,.0f} ({bk['pay_method']})" if bk.get('pay_amt') else "💳 Payment Pending"
+                    check_dates = f"📅 {bk['check_in']} to {bk['check_out']}" if bk.get('check_in') else f"📅 {bk['book_date']}"
+                    
                     st.sidebar.markdown(f"""
                         <div class="booking-card">
                             <div style="font-weight: 600; margin-bottom: 5px;">
@@ -848,8 +1121,9 @@ else:
                             </div>
                             <div style="font-size: 0.9rem; color: #555;">
                                 🏨 {bk['hotel_name']}<br>
-                                📅 {bk['book_date']}<br>
-                                👥 {bk['book_type'].title()}<br>
+                                {check_dates}<br>
+                                {room_info}<br>
+                                {payment_info}<br>
                                 <span style="background: {'#4CAF50' if bk['booking_status']=='Confirmed' else '#FF9800'}; 
                                       color: white; padding: 2px 8px; border-radius: 5px; font-size: 0.8rem;">
                                     {bk['booking_status'].upper()}

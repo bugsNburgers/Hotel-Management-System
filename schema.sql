@@ -69,28 +69,48 @@ CREATE TABLE Hotel_Class (
 );
 
 -- ==========================
+-- 3️⃣ ROOMS MODULE
+-- ==========================
+CREATE TABLE Rooms (
+    room_id INT AUTO_INCREMENT PRIMARY KEY,
+    hotel_id INT NOT NULL,
+    class_id INT NOT NULL,
+    room_number VARCHAR(20) NOT NULL,
+    room_status ENUM('Available','Occupied','Maintenance','Reserved') DEFAULT 'Available',
+    FOREIGN KEY (hotel_id) REFERENCES Hotel(hotel_id) ON DELETE CASCADE,
+    FOREIGN KEY (class_id) REFERENCES Hotel_Class(class_id) ON DELETE CASCADE,
+    UNIQUE KEY unique_room (hotel_id, room_number)
+);
+
+-- ==========================
 -- 4️⃣ CUSTOMER & BOOKING MODULE
 -- ==========================
 CREATE TABLE Customer (
     cust_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNIQUE,
     cust_name VARCHAR(120) NOT NULL,
     cust_email VARCHAR(150) UNIQUE,
     cust_mobile VARCHAR(20),
-    cust_pass VARCHAR(255)
+    cust_pass VARCHAR(255),
+    FOREIGN KEY (user_id) REFERENCES User(user_id) ON DELETE SET NULL
 );
 
 CREATE TABLE Booking (
     book_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
     cust_id INT NOT NULL,
     hotel_id INT NOT NULL,
+    room_id INT,
     book_date DATE NOT NULL,
     check_in DATE,
     check_out DATE,
     book_type VARCHAR(50),
     book_desc TEXT,
     booking_status ENUM('Pending','Confirmed','Cancelled') DEFAULT 'Confirmed',
+    FOREIGN KEY (user_id) REFERENCES User(user_id) ON DELETE CASCADE,
     FOREIGN KEY (cust_id) REFERENCES Customer(cust_id) ON DELETE CASCADE,
-    FOREIGN KEY (hotel_id) REFERENCES Hotel(hotel_id) ON DELETE CASCADE
+    FOREIGN KEY (hotel_id) REFERENCES Hotel(hotel_id) ON DELETE CASCADE,
+    FOREIGN KEY (room_id) REFERENCES Rooms(room_id) ON DELETE SET NULL
 );
 
 -- ==========================
@@ -98,11 +118,13 @@ CREATE TABLE Booking (
 -- ==========================
 CREATE TABLE Payment (
     pay_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
     book_id INT NOT NULL,
     pay_date DATE NOT NULL,
     pay_amt DECIMAL(10,2) NOT NULL,
     pay_method ENUM('Card','UPI','Cash','Online') DEFAULT 'Cash',
     pay_desc TEXT,
+    FOREIGN KEY (user_id) REFERENCES User(user_id) ON DELETE CASCADE,
     FOREIGN KEY (book_id) REFERENCES Booking(book_id) ON DELETE CASCADE
 );
 
@@ -122,7 +144,11 @@ CREATE TABLE IF NOT EXISTS Payment_Audit (
 -- 6️⃣ INDEXES FOR PERFORMANCE
 -- ==========================
 CREATE INDEX idx_booking_date ON Booking(book_date);
+CREATE INDEX idx_booking_user ON Booking(user_id);
 CREATE INDEX idx_customer_email ON Customer(cust_email);
+CREATE INDEX idx_payment_user ON Payment(user_id);
+CREATE INDEX idx_rooms_hotel ON Rooms(hotel_id);
+CREATE INDEX idx_rooms_status ON Rooms(room_status);
 
 -- ==========================
 -- 7️⃣ VIEWS
@@ -150,25 +176,37 @@ DELIMITER $$
 
 -- PROCEDURE: BOOKING
 CREATE PROCEDURE sp_make_booking(
+    IN p_user_id INT,
     IN p_cust_id INT,
     IN p_hotel_id INT,
+    IN p_room_id INT,
     IN p_book_date DATE,
+    IN p_check_in DATE,
+    IN p_check_out DATE,
     IN p_book_type VARCHAR(50),
     IN p_book_desc TEXT,
-    IN p_pay_amt DECIMAL(10,2)
+    IN p_pay_amt DECIMAL(10,2),
+    IN p_pay_method VARCHAR(20)
 )
 BEGIN
     DECLARE last_book_id INT;
     START TRANSACTION;
     
-    INSERT INTO Booking (cust_id, hotel_id, book_date, book_type, book_desc)
-    VALUES (p_cust_id, p_hotel_id, p_book_date, p_book_type, p_book_desc);
+    -- Insert booking with user_id and room_id
+    INSERT INTO Booking (user_id, cust_id, hotel_id, room_id, book_date, check_in, check_out, book_type, book_desc)
+    VALUES (p_user_id, p_cust_id, p_hotel_id, p_room_id, p_book_date, p_check_in, p_check_out, p_book_type, p_book_desc);
     
     SET last_book_id = LAST_INSERT_ID();
     
+    -- Update room status to Reserved
+    IF p_room_id IS NOT NULL THEN
+        UPDATE Rooms SET room_status = 'Reserved' WHERE room_id = p_room_id;
+    END IF;
+    
+    -- Insert payment with user_id
     IF p_pay_amt > 0 THEN
-        INSERT INTO Payment (book_id, pay_date, pay_amt, pay_desc)
-        VALUES (last_book_id, p_book_date, p_pay_amt, CONCAT('Auto payment for booking ', last_book_id));
+        INSERT INTO Payment (user_id, book_id, pay_date, pay_amt, pay_method, pay_desc)
+        VALUES (p_user_id, last_book_id, p_book_date, p_pay_amt, p_pay_method, CONCAT('Payment for booking #', last_book_id));
     END IF;
     
     COMMIT;
@@ -188,6 +226,16 @@ BEGIN
     SELECT COALESCE(SUM(pay_amt),0.00) INTO total
     FROM Payment WHERE book_id = bid;
     RETURN total;
+END$$
+
+-- FUNCTION: Check room availability
+CREATE FUNCTION fn_check_room_availability(rid INT)
+RETURNS VARCHAR(20)
+DETERMINISTIC
+BEGIN
+    DECLARE status VARCHAR(20);
+    SELECT room_status INTO status FROM Rooms WHERE room_id = rid;
+    RETURN status;
 END$$
 
 -- ==========================
@@ -246,22 +294,32 @@ INSERT INTO Hotel_Class (hotel_id, class_name, class_rent, room_count) VALUES
 (1, 'Executive Suite', 5000.00, 5),
 (1, 'Presidential Suite', 10000.00, 2);
 
--- Sample Customer
-INSERT INTO Customer (cust_name, cust_email, cust_mobile, cust_pass)
-VALUES ('Jane Doe','jane.doe@example.com','7777777777','customerpass');
+-- Sample Customer (linked to User)
+INSERT INTO User (user_name, user_email, user_mobile, user_address)
+VALUES ('Jane Doe','jane.doe@example.com','7777777777','Bangalore, India');
 
--- Sample Booking
-INSERT INTO Booking (cust_id, hotel_id, book_date, check_in, check_out, book_type, book_desc)
-VALUES (1, 1, CURDATE(), CURDATE(), DATE_ADD(CURDATE(), INTERVAL 2 DAY), 'double', 'Honeymoon package');
+INSERT INTO Customer (user_id, cust_name, cust_email, cust_mobile, cust_pass)
+VALUES (3, 'Jane Doe','jane.doe@example.com','7777777777','customerpass');
 
--- Sample Payment
-INSERT INTO Payment (book_id, pay_date, pay_amt, pay_method, pay_desc)
-VALUES (1, CURDATE(), 7000.00, 'Card', 'Payment for 2 nights - Deluxe Room');
+INSERT INTO User_Roles (user_id, role_id)
+VALUES (3, 3); -- Customer role
 
--- Sample Staff Schedule
-INSERT INTO Staff_Schedule (user_id, role_name, shift_date, shift_start, shift_end, status) VALUES
-(2, 'receptionist', CURDATE(), '09:00:00', '17:00:00', 'Scheduled'),
-(2, 'concierge', DATE_ADD(CURDATE(), INTERVAL 1 DAY), '14:00:00', '22:00:00', 'Scheduled');
+-- Sample Booking (now includes user_id and room_id)
+INSERT INTO Booking (user_id, cust_id, hotel_id, room_id, book_date, check_in, check_out, book_type, book_desc)
+VALUES (3, 1, 1, 3, CURDATE(), CURDATE(), DATE_ADD(CURDATE(), INTERVAL 2 DAY), 'double', 'Honeymoon package');
+
+-- Sample Payment (now includes user_id)
+INSERT INTO Payment (user_id, book_id, pay_date, pay_amt, pay_method, pay_desc)
+VALUES (3, 1, CURDATE(), 7000.00, 'Card', 'Payment for 2 nights - Deluxe Room');
+
+-- Sample Rooms
+INSERT INTO Rooms (hotel_id, class_id, room_number, room_status) VALUES
+(1, 1, '101', 'Available'),
+(1, 1, '102', 'Available'),
+(1, 2, '201', 'Occupied'),
+(1, 2, '202', 'Available'),
+(1, 3, '301', 'Available'),
+(1, 4, '401', 'Available');
 
 -- ==========================
 -- 1️⃣3️⃣ USEFUL QUERIES
