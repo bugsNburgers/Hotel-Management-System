@@ -5,7 +5,6 @@ A comprehensive hotel booking and management system built with **Streamlit** and
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red.svg)
 ![MySQL](https://img.shields.io/badge/MySQL-5.7+-orange.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
 
 ---
 
